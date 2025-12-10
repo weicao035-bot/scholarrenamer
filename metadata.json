@@ -1,0 +1,5 @@
+{
+  "name": "ScholarRenamer",
+  "description": "Automatically rename academic PDF files by extracting metadata (Year, Author, Title) and translating titles to Chinese using Gemini AI.",
+  "requestFramePermissions": []
+}
