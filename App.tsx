@@ -1,222 +1,466 @@
-
-import React, { useState, useEffect, useRef } from 'react';
-import { v4 as uuidv4 } from 'uuid';
+import React, { useState, useCallback, useEffect } from 'react';
+import { UploadCloud, FileText, Trash2, Settings2, ArrowLeft, ArrowRight, Download, Package } from 'lucide-react';
+import { ProcessedFile, ProcessingStatus, RenamingConfig, MetadataField, ExtractedMetadata } from './types';
+import FileCard from './components/FileCard';
+import { extractTextFromPdf } from './utils/pdfUtils';
+import { extractMetadataFromText } from './services/geminiService';
 import JSZip from 'jszip';
-import { 
-  ManagedFile, 
-  ProcessStatus, 
-  AppSettings, 
-  RenamingPart,
-  PaperMetadata
-} from './types';
-import { extractPdfText } from './services/pdfService';
-import { extractMetadata } from './services/geminiService';
-import RenamingPreferences from './components/RenamingPreferences';
-import FileList from './components/FileList';
+
+const DEFAULT_CONFIG: RenamingConfig = {
+  fields: ['year', 'journal', 'author', 'title'],
+  separator: '-',
+  titleLanguage: 'chinese',
+  enabledFields: {
+    year: true,
+    author: true,
+    title: true,
+    journal: false,
+  }
+};
 
 const App: React.FC = () => {
-  const [files, setFiles] = useState<ManagedFile[]>([]);
+  const [files, setFiles] = useState<ProcessedFile[]>([]);
   const [isDragging, setIsDragging] = useState(false);
-  const processingRef = useRef<boolean>(false);
-  
-  const [settings, setSettings] = useState<AppSettings>({
-    namingOrder: ['Year', 'Author', 'Title', 'Journal'],
-    activeParts: new Set(['Year', 'Author', 'Title']),
-    useTranslation: false,
-    separator: '-'
-  });
+  const [config, setConfig] = useState<RenamingConfig>(DEFAULT_CONFIG);
+  const [showSettings, setShowSettings] = useState(true);
 
-  // Helper to get the final filename for a file based on settings or custom override
-  const getFinalName = (file: ManagedFile) => {
-    if (file.customFileName) return file.customFileName;
-    if (!file.metadata) return file.file.name;
+  // --- Naming Logic ---
+
+  const generateFileName = useCallback((metadata: ExtractedMetadata, currentConfig: RenamingConfig) => {
+    const parts: string[] = [];
     
-    const { metadata } = file;
-    const parts = settings.namingOrder
-      .filter(p => settings.activeParts.has(p))
-      .map(p => {
-        if (p === 'Year') return metadata.year;
-        if (p === 'Author') return metadata.author;
-        if (p === 'Journal') return metadata.journal;
-        if (p === 'Title') return settings.useTranslation ? metadata.translatedTitle : metadata.title;
-        return '';
-      });
-    const generated = parts.filter(Boolean).join(settings.separator).replace(/[\\/:*?"<>|]/g, '_');
-    return generated ? `${generated}.pdf` : file.file.name;
-  };
+    currentConfig.fields.forEach(field => {
+      if (!currentConfig.enabledFields[field]) return;
 
-  // Automatically trigger processing when new idle files are added
-  useEffect(() => {
-    const processIdleFiles = async () => {
-      if (processingRef.current) return;
-      
-      const idleFiles = files.filter(f => f.status === ProcessStatus.IDLE);
-      if (idleFiles.length === 0) return;
-
-      processingRef.current = true;
-
-      for (const file of idleFiles) {
-        try {
-          setFiles(prev => prev.map(f => f.id === file.id ? { ...f, status: ProcessStatus.READING } : f));
-          const text = await extractPdfText(file.file);
-          
-          setFiles(prev => prev.map(f => f.id === file.id ? { ...f, status: ProcessStatus.EXTRACTING } : f));
-          const metadata = await extractMetadata(text);
-
-          setFiles(prev => prev.map(f => f.id === file.id ? { ...f, status: ProcessStatus.COMPLETED, metadata } : f));
-        } catch (err: any) {
-          setFiles(prev => prev.map(f => f.id === file.id ? { ...f, status: ProcessStatus.ERROR, errorMessage: err.message } : f));
+      if (field === 'year') {
+        const safeYear = (metadata.year || new Date().getFullYear().toString()).trim();
+        parts.push(safeYear);
+      } else if (field === 'author') {
+        const safeAuthor = (metadata.firstAuthor || "Unknown").replace(/[^\w\u4e00-\u9fa5-]/g, '');
+        parts.push(safeAuthor);
+      } else if (field === 'journal') {
+        if (metadata.journalName) {
+           const safeJournal = metadata.journalName.replace(/[^\w\u4e00-\u9fa5-]/g, '');
+           parts.push(safeJournal);
         }
+      } else if (field === 'title') {
+        const rawTitle = currentConfig.titleLanguage === 'chinese' ? metadata.chineseTitle : metadata.originalTitle;
+        const titleToUse = rawTitle || metadata.originalTitle || "Untitled";
+        const safeTitle = titleToUse.replace(/[\\/:*?"<>|]/g, '_').substring(0, 80).trim(); 
+        parts.push(safeTitle);
       }
-
-      processingRef.current = false;
-    };
-
-    processIdleFiles();
-  }, [files]);
-
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement> | React.DragEvent) => {
-    let rawFiles: File[] = [];
-    if ('files' in e.target && (e.target as HTMLInputElement).files) {
-      rawFiles = Array.from((e.target as HTMLInputElement).files!);
-    } else if ('dataTransfer' in e && e.dataTransfer.files) {
-      rawFiles = Array.from(e.dataTransfer.files);
-    }
-    
-    const validFiles = rawFiles.filter(f => f.type === 'application/pdf');
-    if (validFiles.length === 0) return;
-
-    const newFiles: ManagedFile[] = validFiles.map(file => ({
-      id: uuidv4(),
-      file,
-      status: ProcessStatus.IDLE
-    }));
-
-    setFiles(prev => [...prev, ...newFiles]);
-  };
-
-  const downloadFile = (file: ManagedFile) => {
-    const fileName = getFinalName(file);
-    const url = URL.createObjectURL(file.file);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = fileName;
-    link.click();
-    URL.revokeObjectURL(url);
-  };
-
-  const downloadAll = async () => {
-    const ready = files.filter(f => f.status === ProcessStatus.COMPLETED && (f.metadata || f.customFileName));
-    if (ready.length === 0) return;
-
-    const zip = new JSZip();
-    ready.forEach(f => {
-      const fileName = getFinalName(f);
-      zip.file(fileName, f.file);
     });
 
-    const blob = await zip.generateAsync({ type: 'blob' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `ScholarRenamer_Output.zip`;
-    link.click();
-    URL.revokeObjectURL(url);
+    if (parts.length === 0) return "Untitled.pdf";
+
+    // Handle separator spacing if users choose specialized separators
+    let separator = currentConfig.separator;
+    if (separator !== '-' && separator !== '_') separator = ` ${separator} `; // Add spacing for words like 'by' if we ever add them, currently just simple chars
+    
+    // Simple join
+    return `${parts.join(currentConfig.separator)}.pdf`;
+  }, []);
+
+  // --- Effects ---
+
+  // Re-generate names whenever config changes
+  useEffect(() => {
+    setFiles(prevFiles => prevFiles.map(file => {
+      if (file.status === ProcessingStatus.COMPLETED && file.metadata) {
+        return {
+          ...file,
+          suggestedName: generateFileName(file.metadata, config)
+        };
+      }
+      return file;
+    }));
+  }, [config, generateFileName]);
+
+  const processFile = async (fileId: string) => {
+    setFiles(prev => prev.map(f => 
+      f.id === fileId ? { ...f, status: ProcessingStatus.READING_PDF, errorMessage: undefined } : f
+    ));
+
+    const currentFile = files.find(f => f.id === fileId);
+    if (!currentFile) return;
+
+    try {
+      // 1. Read PDF
+      const text = await extractTextFromPdf(currentFile.originalFile);
+      
+      setFiles(prev => prev.map(f => 
+        f.id === fileId ? { ...f, status: ProcessingStatus.ANALYZING_AI } : f
+      ));
+
+      // 2. AI Extraction
+      const metadata = await extractMetadataFromText(text);
+
+      // 3. Generate Name using current config (via the effect mostly, but we set it here initially)
+      const newName = generateFileName(metadata, config);
+
+      setFiles(prev => prev.map(f => 
+        f.id === fileId ? { 
+          ...f, 
+          status: ProcessingStatus.COMPLETED, 
+          metadata, 
+          suggestedName: newName 
+        } : f
+      ));
+
+    } catch (err) {
+      console.error(err);
+      setFiles(prev => prev.map(f => 
+        f.id === fileId ? { 
+          ...f, 
+          status: ProcessingStatus.ERROR, 
+          errorMessage: err instanceof Error ? err.message : "Unknown error" 
+        } : f
+      ));
+    }
   };
 
-  const handleUpdateFileName = (id: string, newName: string) => {
-    setFiles(prev => prev.map(f => f.id === id ? { ...f, customFileName: newName } : f));
+  const handleFilesAdded = async (newFiles: File[]) => {
+    const processedFiles: ProcessedFile[] = newFiles
+      .filter(f => f.type === 'application/pdf')
+      .map(f => ({
+        id: Math.random().toString(36).substr(2, 9),
+        originalFile: f,
+        originalName: f.name,
+        status: ProcessingStatus.IDLE
+      }));
+
+    if (processedFiles.length === 0) {
+      alert("Please upload valid PDF files.");
+      return;
+    }
+
+    setFiles(prev => [...prev, ...processedFiles]);
   };
 
-  const isAnyProcessing = files.some(f => f.status === ProcessStatus.READING || f.status === ProcessStatus.EXTRACTING);
+  // Trigger processing for IDLE files
+  useEffect(() => {
+    files.forEach(file => {
+      if (file.status === ProcessingStatus.IDLE) {
+        processFile(file.id);
+      }
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [files.length]); 
+
+  // --- Batch Actions ---
+
+  const handleDownloadAll = async () => {
+    const completedFiles = files.filter(f => f.status === ProcessingStatus.COMPLETED);
+    if (completedFiles.length === 0) return;
+
+    const zip = new JSZip();
+    
+    // Create a folder or just root files? Root is better for quick access.
+    completedFiles.forEach(file => {
+      const fileName = file.suggestedName || file.originalName;
+      zip.file(fileName, file.originalFile);
+    });
+
+    try {
+      const blob = await zip.generateAsync({ type: "blob" });
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = `renamed_papers_${new Date().toISOString().slice(0, 10)}.zip`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    } catch (e) {
+      console.error("Failed to zip files", e);
+      alert("Failed to create ZIP archive.");
+    }
+  };
+
+  // --- Config Handlers ---
+
+  const moveField = (index: number, direction: 'left' | 'right') => {
+    const newFields = [...config.fields];
+    if (direction === 'left' && index > 0) {
+      [newFields[index - 1], newFields[index]] = [newFields[index], newFields[index - 1]];
+    } else if (direction === 'right' && index < newFields.length - 1) {
+      [newFields[index + 1], newFields[index]] = [newFields[index], newFields[index + 1]];
+    }
+    setConfig({ ...config, fields: newFields });
+  };
+
+  const toggleField = (field: MetadataField) => {
+    setConfig({ 
+      ...config, 
+      enabledFields: { ...config.enabledFields, [field]: !config.enabledFields[field] } 
+    });
+  };
+
+  // --- Drag Handlers ---
+
+  const onDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(true);
+  }, []);
+
+  const onDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+  }, []);
+
+  const onDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      handleFilesAdded(Array.from(e.dataTransfer.files));
+    }
+  }, []);
+
+  const handleFileInput = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0) {
+      handleFilesAdded(Array.from(e.target.files));
+    }
+    e.target.value = '';
+  };
+
+  const removeFile = (id: string) => {
+    setFiles(prev => prev.filter(f => f.id !== id));
+  };
+
+  const updateFileName = (id: string, newName: string) => {
+    setFiles(prev => prev.map(f => f.id === id ? { ...f, suggestedName: newName } : f));
+  };
+
+  const clearAll = () => {
+    setFiles([]);
+  };
+
+  const getFieldLabel = (field: MetadataField) => {
+    switch (field) {
+      case 'year': return 'Year';
+      case 'author': return 'Author';
+      case 'title': return 'Title';
+      case 'journal': return 'Journal';
+    }
+  };
 
   return (
-    <div 
-      className="min-h-screen bg-[#F8FAFC] pb-24"
-      onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
-      onDragLeave={() => setIsDragging(false)}
-      onDrop={(e) => { e.preventDefault(); setIsDragging(false); handleFileUpload(e); }}
-    >
-      {/* Header Section */}
-      <div className="pt-12 pb-10 text-center">
-        <div className="inline-flex items-center justify-center w-14 h-14 bg-blue-600 rounded-2xl shadow-xl shadow-blue-200 mb-5">
-          <i className="fas fa-file-alt text-2xl text-white"></i>
+    <div className="min-h-screen flex flex-col items-center py-12 px-4 sm:px-6 lg:px-8 bg-[#f3f4f6]">
+      <div className="w-full max-w-4xl space-y-8">
+        
+        {/* Header */}
+        <div className="text-center space-y-2">
+          <div className="flex items-center justify-center gap-3 mb-4">
+             <div className="bg-blue-600 p-3 rounded-xl shadow-lg shadow-blue-200">
+               <FileText className="text-white w-8 h-8" />
+             </div>
+          </div>
+          <h1 className="text-4xl font-extrabold text-gray-900 tracking-tight">
+            Scholar<span className="text-blue-600">Renamer</span>
+          </h1>
+          <p className="text-lg text-gray-500 max-w-xl mx-auto">
+            Extract metadata from academic PDFs and batch rename them.
+          </p>
         </div>
-        <h1 className="text-4xl font-extrabold tracking-tight mb-3">
-          <span className="text-gray-900">Scholar</span>
-          <span className="text-blue-600">Renamer</span>
-        </h1>
-        <p className="text-gray-500 text-base">Extract metadata from academic PDFs and batch rename them.</p>
-      </div>
 
-      <main className="max-w-4xl mx-auto px-4 space-y-8">
-        {/* Settings Card */}
-        <RenamingPreferences settings={settings} setSettings={setSettings} />
+        {/* Configuration Panel */}
+        <div className="bg-white rounded-2xl p-6 shadow-sm border border-gray-200 transition-all">
+          <div className="flex items-center justify-between mb-4 cursor-pointer" onClick={() => setShowSettings(!showSettings)}>
+            <div className="flex items-center gap-2 text-gray-800 font-semibold">
+              <Settings2 size={20} className="text-blue-500" />
+              <span>Renaming Preferences</span>
+            </div>
+            <button className="text-sm text-blue-500 hover:text-blue-700 font-medium">
+              {showSettings ? 'Hide' : 'Customize'}
+            </button>
+          </div>
+
+          {showSettings && (
+            <div className="space-y-6 animate-in fade-in slide-in-from-top-2 duration-300">
+              
+              {/* Pattern Builder */}
+              <div>
+                <label className="block text-sm font-medium text-gray-500 mb-3">Naming Pattern Order & Visibility</label>
+                <div className="flex flex-wrap items-center gap-3">
+                  {config.fields.map((field, index) => (
+                    <div key={field} className={`
+                      flex items-center gap-2 pl-3 pr-2 py-2 rounded-lg border transition-all select-none
+                      ${config.enabledFields[field] 
+                        ? 'bg-blue-50 border-blue-200 shadow-sm' 
+                        : 'bg-gray-50 border-gray-200 opacity-60 grayscale'}
+                    `}>
+                      <div className="flex items-center gap-2">
+                         <input 
+                           type="checkbox" 
+                           checked={config.enabledFields[field]}
+                           onChange={() => toggleField(field)}
+                           className="w-4 h-4 text-blue-600 rounded focus:ring-blue-500"
+                         />
+                         <span className="text-sm font-bold text-gray-700">{getFieldLabel(field)}</span>
+                      </div>
+
+                      {/* Title Specific Options */}
+                      {field === 'title' && config.enabledFields['title'] && (
+                        <select 
+                          value={config.titleLanguage}
+                          onChange={(e) => setConfig({...config, titleLanguage: e.target.value as any})}
+                          className="ml-2 text-xs border-none bg-white py-1 pl-2 pr-6 rounded text-gray-600 focus:ring-1 focus:ring-blue-300 cursor-pointer"
+                        >
+                          <option value="chinese">Chinese</option>
+                          <option value="original">Original</option>
+                        </select>
+                      )}
+
+                      {/* Reordering Controls */}
+                      <div className="flex flex-col ml-2 border-l border-gray-300/50 pl-1 gap-0.5">
+                        <button 
+                          onClick={() => moveField(index, 'left')} 
+                          disabled={index === 0}
+                          className="p-0.5 hover:bg-blue-200 rounded text-gray-400 hover:text-blue-700 disabled:opacity-30"
+                        >
+                          <ArrowLeft size={10} />
+                        </button>
+                        <button 
+                           onClick={() => moveField(index, 'right')} 
+                           disabled={index === config.fields.length - 1}
+                           className="p-0.5 hover:bg-blue-200 rounded text-gray-400 hover:text-blue-700 disabled:opacity-30"
+                        >
+                          <ArrowRight size={10} />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Separator Config */}
+              <div className="flex items-center gap-4">
+                 <div>
+                   <label className="block text-sm font-medium text-gray-500 mb-1">Separator</label>
+                   <div className="flex bg-gray-100 p-1 rounded-lg">
+                      {['-', '_', ' '].map(sep => (
+                        <button
+                          key={sep}
+                          onClick={() => setConfig({...config, separator: sep})}
+                          className={`
+                            w-8 h-8 flex items-center justify-center rounded-md text-sm font-mono transition-all
+                            ${config.separator === sep ? 'bg-white text-blue-600 shadow-sm font-bold' : 'text-gray-500 hover:text-gray-700'}
+                          `}
+                        >
+                          {sep === ' ' ? '␣' : sep}
+                        </button>
+                      ))}
+                   </div>
+                 </div>
+                 
+                 <div className="flex-grow pl-4 border-l border-gray-200">
+                   <label className="block text-sm font-medium text-gray-500 mb-1">Preview</label>
+                   <div className="text-sm text-gray-600 font-mono bg-gray-50 px-3 py-1.5 rounded border border-gray-200 truncate">
+                      {generateFileName({
+                        year: '2024',
+                        firstAuthor: 'Smith',
+                        originalTitle: 'Deep Learning for Science',
+                        chineseTitle: '深度学习在科学中的应用',
+                        journalName: 'Nature'
+                      }, config)}
+                   </div>
+                 </div>
+              </div>
+
+            </div>
+          )}
+        </div>
 
         {/* Upload Area */}
-        <div 
-          onClick={() => document.getElementById('file-input')?.click()}
-          className={`relative group cursor-pointer bg-white border-2 border-dashed rounded-[32px] p-12 transition-all duration-300 ${
-            isDragging ? 'border-blue-500 bg-blue-50 scale-[1.01]' : 'border-gray-200 hover:border-blue-400'
-          }`}
+        <div
+          onDragOver={onDragOver}
+          onDragLeave={onDragLeave}
+          onDrop={onDrop}
+          className={`
+            relative group border-2 border-dashed rounded-2xl p-8 text-center transition-all duration-300 ease-in-out cursor-pointer
+            ${isDragging 
+              ? 'border-blue-500 bg-blue-50 scale-[1.01] shadow-xl' 
+              : 'border-gray-300 hover:border-blue-400 hover:bg-gray-50 bg-white shadow-sm'
+            }
+          `}
+          onClick={() => document.getElementById('fileInput')?.click()}
         >
-          <input id="file-input" type="file" multiple accept=".pdf" className="hidden" onChange={handleFileUpload} />
-          <div className="flex flex-col items-center">
-            <div className="w-16 h-16 bg-blue-50 rounded-full flex items-center justify-center mb-5 group-hover:scale-110 transition-transform">
-              <i className="fas fa-cloud-upload-alt text-2xl text-blue-500"></i>
+          <input
+            id="fileInput"
+            type="file"
+            multiple
+            accept=".pdf"
+            className="hidden"
+            onChange={handleFileInput}
+          />
+          <div className="flex flex-col items-center justify-center gap-4">
+            <div className={`p-4 rounded-full bg-blue-50 text-blue-500 transition-transform duration-300 ${isDragging ? 'scale-110 bg-blue-100' : ''}`}>
+              <UploadCloud size={32} />
             </div>
-            <h3 className="text-xl font-bold text-gray-800 mb-1">Click to upload or drag and drop</h3>
-            <p className="text-gray-400 text-sm">Supports PDF files • Automatic AI Analysis</p>
+            <div>
+              <p className="text-lg font-semibold text-gray-700">
+                Click to upload or drag and drop
+              </p>
+              <p className="text-sm text-gray-400 mt-1">
+                Supports PDF files
+              </p>
+            </div>
           </div>
         </div>
 
-        {/* Process Bar */}
-        {files.length > 0 && (
-          <div className="flex items-center justify-between bg-white px-6 py-4 rounded-2xl shadow-sm border border-gray-100">
-            <div className="flex items-center gap-3">
-              <span className="text-sm font-semibold text-gray-600">
-                <span className="text-blue-600 font-bold">{files.length}</span> Files
-              </span>
-              {isAnyProcessing && (
-                <div className="flex items-center gap-2 text-blue-600 text-xs font-bold bg-blue-50 px-3 py-1 rounded-full animate-pulse">
-                  <i className="fas fa-spinner fa-spin"></i>
-                  AI ANALYZING...
-                </div>
-              )}
-            </div>
-            <div className="flex gap-3">
-              <button 
-                onClick={() => setFiles([])}
-                className="px-5 py-2 text-sm font-bold text-gray-400 hover:text-gray-600 transition-colors"
-              >
-                Clear All
-              </button>
-              {files.some(f => f.status === ProcessStatus.COMPLETED) && (
+        {/* File List */}
+        <div className="space-y-4">
+          {files.length > 0 && (
+            <div className="flex items-center justify-between pb-2 border-b border-gray-200">
+              <h2 className="text-lg font-semibold text-gray-800">
+                Files ({files.length})
+              </h2>
+              
+              <div className="flex items-center gap-3">
+                {files.some(f => f.status === ProcessingStatus.COMPLETED) && (
+                   <button 
+                   onClick={handleDownloadAll}
+                   className="text-sm text-blue-600 bg-blue-50 hover:bg-blue-100 flex items-center gap-1 px-3 py-1.5 rounded transition-colors font-medium"
+                 >
+                   <Package size={16} /> Download ZIP
+                 </button>
+                )}
+                
                 <button 
-                  onClick={downloadAll}
-                  className="px-6 py-2.5 bg-blue-600 text-white rounded-xl text-sm font-bold hover:bg-blue-700 shadow-lg shadow-blue-100 flex items-center gap-2 transition-all active:scale-95"
+                  onClick={clearAll}
+                  className="text-sm text-red-500 hover:text-red-700 flex items-center gap-1 px-3 py-1.5 rounded hover:bg-red-50 transition-colors"
                 >
-                  <i className="fas fa-download"></i>
-                  Download ZIP
+                  <Trash2 size={16} /> Clear All
                 </button>
-              )}
+              </div>
             </div>
+          )}
+          
+          <div className="space-y-3">
+            {files.map(file => (
+              <FileCard
+                key={file.id}
+                file={file}
+                onRemove={removeFile}
+                onUpdateName={updateFileName}
+                onRetry={(id) => processFile(id)}
+              />
+            ))}
           </div>
-        )}
 
-        {/* Results List */}
-        <FileList 
-          files={files} 
-          settings={settings} 
-          onRemove={(id) => setFiles(f => f.filter(x => x.id !== id))} 
-          onDownload={downloadFile}
-          onUpdateFileName={handleUpdateFileName}
-        />
-      </main>
+          {files.length === 0 && (
+             <div className="text-center py-8 opacity-30 select-none">
+               <div className="inline-block p-4 rounded-full bg-gray-100 mb-3">
+                 <FileText size={32} className="text-gray-400" />
+               </div>
+               <p className="text-gray-400 font-medium">No files in queue</p>
+             </div>
+          )}
+        </div>
 
-      <footer className="mt-20 text-center text-gray-300 text-xs tracking-wider uppercase font-semibold">
-        Scholar Renamer &bull; Powered by Gemini AI &bull; No Local API Key Required
-      </footer>
+      </div>
+      
+      <div className="fixed bottom-4 right-4 text-xs text-gray-400 flex flex-col items-end gap-1">
+        <span>Powered by Gemini 2.5 Flash</span>
+      </div>
     </div>
   );
 };

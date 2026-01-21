@@ -1,5 +1,5 @@
 {
-  "name": "Academic PDF Renamer",
-  "description": "A powerful utility to batch process academic PDFs, extract metadata (Year, Author, Title), and rename them with custom formats and translations.",
+  "name": "ScholarRenamer",
+  "description": "Automatically rename academic PDF files by extracting metadata (Year, Author, Title) and translating titles to Chinese using Gemini AI.",
   "requestFramePermissions": []
 }

@@ -1,34 +1,34 @@
-
-export interface PaperMetadata {
-  year: string;
-  author: string;
-  title: string;
-  journal: string;
-  translatedTitle: string;
-}
-
-export enum ProcessStatus {
+export enum ProcessingStatus {
   IDLE = 'IDLE',
-  READING = 'READING',
-  EXTRACTING = 'EXTRACTING',
+  READING_PDF = 'READING_PDF',
+  ANALYZING_AI = 'ANALYZING_AI',
   COMPLETED = 'COMPLETED',
-  ERROR = 'ERROR'
+  ERROR = 'ERROR',
 }
 
-export interface ManagedFile {
+export interface ExtractedMetadata {
+  year: string;
+  firstAuthor: string;
+  originalTitle: string;
+  chineseTitle: string;
+  journalName?: string;
+}
+
+export interface ProcessedFile {
   id: string;
-  file: File;
-  metadata?: PaperMetadata;
-  status: ProcessStatus;
+  originalFile: File;
+  originalName: string;
+  status: ProcessingStatus;
+  metadata?: ExtractedMetadata;
+  suggestedName?: string;
   errorMessage?: string;
-  customFileName?: string; // Manual override for the generated name
 }
 
-export type RenamingPart = 'Year' | 'Journal' | 'Author' | 'Title';
+export type MetadataField = 'year' | 'author' | 'title' | 'journal';
 
-export interface AppSettings {
-  namingOrder: RenamingPart[];
-  activeParts: Set<RenamingPart>;
-  useTranslation: boolean;
+export interface RenamingConfig {
+  fields: MetadataField[];
   separator: string;
+  titleLanguage: 'original' | 'chinese';
+  enabledFields: Record<MetadataField, boolean>;
 }
